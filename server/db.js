@@ -98,6 +98,27 @@ CREATE TABLE IF NOT EXISTS weather_log (
   msg TEXT NOT NULL,
   UNIQUE(event_id, abs_day)
 );
+
+-- 加工生产工单：批量排产，按游戏天串行推进；取消时记录取消绝对日用于退料与队列重排
+CREATE TABLE IF NOT EXISTS production_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipe_id TEXT NOT NULL,              -- 配方 id（见 server/production.js RECIPES）
+  recipe_name TEXT NOT NULL,
+  result_id TEXT NOT NULL,
+  result_name TEXT NOT NULL,
+  result_cat TEXT NOT NULL,
+  from_id TEXT NOT NULL,
+  from_name TEXT NOT NULL,
+  from_cat TEXT NOT NULL,
+  consume INTEGER NOT NULL,             -- 每批消耗原料数
+  gain INTEGER NOT NULL,                -- 每批产出成品数
+  days INTEGER NOT NULL,                -- 每批耗时（游戏天）
+  qty INTEGER NOT NULL,                 -- 批次数
+  finished INTEGER NOT NULL DEFAULT 0,  -- 已完工批次数（跨天结算时落库）
+  enqueue_abs INTEGER NOT NULL,         -- 排产时的绝对天
+  cancel_abs INTEGER DEFAULT NULL,      -- 取消时的绝对天（NULL 未取消）
+  status TEXT NOT NULL DEFAULT 'running' -- running/done/canceled/collected
+);
 `)
 
 // 兼容旧存档：player 增加绝对天数（天气结算对齐用）

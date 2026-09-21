@@ -20,6 +20,10 @@ export const useGameStore = defineStore('game', {
     plots: [],
     weather: null,
     weatherLog: [],
+    recipes: [],
+    productionJobs: [],
+    queueCapacity: 0,
+    queuedBatches: 0,
     selectedPlot: null,
     seedMode: false,
     selectedCropId: null,
@@ -44,6 +48,10 @@ export const useGameStore = defineStore('game', {
       this.plots = d.plots
       this.weather = d.weather
       this.weatherLog = d.weatherLog || []
+      this.recipes = d.recipes || []
+      this.productionJobs = d.productionJobs || []
+      this.queueCapacity = d.queueCapacity || 0
+      this.queuedBatches = d.queuedBatches || 0
       this.loaded = true
     },
     pushLog(msg, type = 'info') {
@@ -90,9 +98,12 @@ export const useGameStore = defineStore('game', {
     async nextDay(n = 1) {
       const r = await api('/skip', 'POST', { n })
       await this.load()
-      // 天气逐日结算记录进入事件时间线
-      ;(r.logs || []).forEach((m) => this.pushLog(m, 'warn'))
-      this.showToast(`时间 +${n} 天`, 'info')
+      const logs = r.logs || []
+      // 天气结算记录只进时间线，不弹 toast；加工完工取第一条弹提示
+      logs.forEach((m) => { if (!m.startsWith('✅')) this.pushLog(m, 'warn') })
+      const done = logs.filter((m) => m.startsWith('✅'))
+      if (done.length) this.showToast(done[0], 'success')
+      else this.showToast(`时间 +${n} 天`, 'info')
     },
     async protect(gold, matQty) {
       try {
@@ -140,11 +151,30 @@ export const useGameStore = defineStore('game', {
         this.showToast(`收集 ${r.item} +${r.gold}金`, 'success')
       } catch (e) { this.showToast(e.message, 'warn') }
     },
-    async processBuild(from, result, consume, gain) {
+    // 批量排产
+    async enqueueProduction(recipeId, qty) {
       try {
-        await api('/process', 'POST', { from, result, consume, gain })
+        await api('/production/enqueue', 'POST', { recipeId, qty })
         await this.load()
-        this.showToast(`加工完成：${result.name}`, 'success')
+        this.showToast(`已排产 ${qty} 批，开工后按天自动推进`, 'success')
+      } catch (e) { this.showToast(e.message, 'warn'); throw e }
+    },
+    // 取消工单（退未开工批次的原料）
+    async cancelProduction(id) {
+      try {
+        const r = await api('/production/cancel', 'POST', { id })
+        await this.load()
+        if (r.refundBatches > 0) this.showToast(`已取消，退回 ${r.refundBatches} 批原料`, 'info')
+        else this.showToast('已取消（无未开工批次可退料）', 'info')
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+    // 完工入库：传 id 领单个，不传一键全领
+    async collectProduction(id = null) {
+      try {
+        const r = await api('/production/collect', 'POST', id == null ? {} : { id })
+        await this.load()
+        const text = r.picked.map((p) => `${p.name}×${p.qty}`).join('、')
+        this.showToast(`完工入库：${text}`, 'success')
       } catch (e) { this.showToast(e.message, 'warn') }
     },
     async upgradeBuilding(id) {

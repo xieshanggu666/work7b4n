@@ -1,6 +1,10 @@
 import express from 'express'
 import { db } from './db.js'
 import { TYPES, ensureWeather, settleWeather, currentWeather } from './weather.js'
+import {
+  RECIPES, capacity, listJobs, queuedBatches,
+  settleProduction, enqueueJob, cancelJob, collectJobs
+} from './production.js'
 
 const app = express()
 app.use(express.json())
@@ -56,15 +60,21 @@ ensureWeather(p0.season, p0.day, p0.abs_day)
 
 // ===== API =====
 app.get('/api/state', (req, res) => {
+  const p = q1('SELECT * FROM player WHERE id=1')
+  const mill = q1('SELECT * FROM buildings WHERE id=2')
   res.json({
-    player: q1('SELECT * FROM player WHERE id=1'),
+    player: p,
     crops: q('SELECT * FROM crops'),
     inventory: q('SELECT * FROM inventory'),
     buildings: q('SELECT * FROM buildings'),
     animals: q('SELECT * FROM animals'),
     plots: q('SELECT * FROM plots'),
     weather: currentWeather(),
-    weatherLog: q('SELECT * FROM weather_log ORDER BY id DESC LIMIT 8')
+    weatherLog: q('SELECT * FROM weather_log ORDER BY id DESC LIMIT 8'),
+    recipes: RECIPES,
+    queueCapacity: capacity(mill?.level || 1),
+    queuedBatches: queuedBatches(p.abs_day),
+    productionJobs: listJobs(p.abs_day)
   })
 })
 
@@ -248,16 +258,45 @@ app.post('/api/collect', (req, res) => {
   res.json({ ok: true, item: prod[0], gold: gain })
 })
 
-// 加工作物
-app.post('/api/process', (req, res) => {
-  const { from, result, consume, gain } = req.body
-  const hold = q1('SELECT qty FROM inventory WHERE item_id=?', from)
-  const stock = hold?.qty || 0
-  if (stock < consume) return res.status(400).json({ error: 'not enough' })
-  run(`UPDATE inventory SET qty=qty-? WHERE item_id=?`, consume, from)
-  addInv(result.id, result.name, result.cat, gain)
-  cleanEmpty()
-  res.json({ ok: true })
+// ===== 加工生产队列 =====
+// 批量排产：recipeId + qty（批次数）
+app.post('/api/production/enqueue', (req, res) => {
+  try {
+    const { recipeId, qty } = req.body
+    const p = q1('SELECT * FROM player WHERE id=1')
+    const mill = q1('SELECT level FROM buildings WHERE id=2')
+    const r = enqueueJob({
+      recipeId,
+      qty: Number(qty) || 1,
+      millLevel: mill?.level || 1,
+      currentAbs: p.abs_day
+    })
+    res.json(r)
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 取消工单：退未开工批次的原料
+app.post('/api/production/cancel', (req, res) => {
+  try {
+    const p = q1('SELECT abs_day FROM player WHERE id=1')
+    const r = cancelJob({ id: Number(req.body?.id), currentAbs: p.abs_day })
+    res.json(r)
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 完工入库：传 id 领单个，不传则一键全领
+app.post('/api/production/collect', (req, res) => {
+  try {
+    const p = q1('SELECT abs_day FROM player WHERE id=1')
+    const r = collectJobs(p.abs_day, req.body?.id != null ? Number(req.body.id) : null)
+    res.json(r)
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
 })
 
 // 升级建筑
@@ -339,6 +378,9 @@ function advanceDay() {
       season = (season + 1) % 4
     }
     run('UPDATE player SET day=?, season=?, abs_day=abs_day+1 WHERE id=1', day, season)
+    // —— 加工队列：按游戏天推进，完工批次落库（与天气/作物同一事务，失败整体回滚）——
+    const plogs = settleProduction(p.abs_day + 1)
+    logs.push(...plogs)
     // 生成次日天气（持续中的事件会自然延续）
     ensureWeather(season, day, p.abs_day + 1)
     db.exec('COMMIT')

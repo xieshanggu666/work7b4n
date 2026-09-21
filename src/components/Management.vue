@@ -1,6 +1,9 @@
 <template>
   <div class="tabs">
-    <button v-for="t in tabs" :key="t.key" :class="{active:tab===t.key}" @click="tab=t.key">{{ t.label }}</button>
+    <button v-for="t in tabs" :key="t.key" :class="{active:tab===t.key}" @click="tab=t.key">
+      {{ t.label }}
+      <span v-if="t.key==='process' && collectableJobs.length" class="badge">{{ collectableJobs.length }}</span>
+    </button>
   </div>
 
   <!-- 市场 -->
@@ -48,18 +51,58 @@
 
   <!-- 加工坊 -->
   <div v-if="tab==='process'" class="page">
+    <!-- 配方 / 批量排产 -->
     <div class="pcol card">
       <h4>⚙️ 加工坊 <span class="lvl">Lv.{{ mill.level }}</span></h4>
-      <div class="row" v-for="r in recipes" :key="r.id">
-        <span class="i">🛠️</span>
-        <div class="m-info">
-          <b>{{ r.name }}</b>
-          <span class="tag">消耗 {{ r.consume }} {{ r.need }}</span>
-          <span class="tag">→ {{ r.result.name }} ×{{ r.gain }}</span>
-        </div>
-        <button class="mini" @click="doProcess(r)">加工</button>
+      <div class="queue-stat">
+        排产占用 <b :class="{full: store.queuedBatches >= store.queueCapacity}">{{ store.queuedBatches }}/{{ store.queueCapacity }}</b> 批
+        <span class="tag">每批按游戏天加工，跨天自动推进</span>
       </div>
-      <button class="wide" @click="store.upgradeBuilding(mill.id)">🔧 升级加工坊（🪙{{ mill.level*40 }}）→ 解锁更多配方</button>
+      <div class="row recipe" v-for="r in store.recipes" :key="r.id">
+        <span class="i">{{ r.icon }}</span>
+        <div class="m-info">
+          <b>{{ r.name }}
+            <span v-if="mill.level < r.needLv" class="tag lock">🔒 Lv.{{ r.needLv }}</span>
+          </b>
+          <span class="tag">{{ r.fromIcon }} {{ r.fromName }} ×{{ r.consume }}/批</span>
+          <span class="tag">→ {{ r.name }} ×{{ r.gain }}</span>
+          <span class="tag">⏱ {{ r.days }} 天/批</span>
+          <span class="tag">库存 ×{{ stockOf(r.from) }}</span>
+        </div>
+        <div class="proc-ctl">
+          <button class="mini" :disabled="!canMake(r,1)" @click="doEnqueue(r,1)">排产×1</button>
+          <button class="mini" :disabled="!canMake(r,5)" @click="doEnqueue(r,5)">排产×5</button>
+        </div>
+      </div>
+      <button class="wide" @click="store.upgradeBuilding(mill.id)">🔧 升级加工坊（🪙{{ mill.level*40 }}）→ 扩容队列、解锁更多配方</button>
+    </div>
+
+    <!-- 生产队列 -->
+    <div class="pcol card">
+      <h4>🏭 生产队列
+        <button v-if="collectableJobs.length" class="mini green collect-all" @click="store.collectProduction()">
+          一键入库（{{ collectableBatches }}）
+        </button>
+      </h4>
+      <div v-if="!activeJobs.length" class="none">队列为空，去左侧选择配方批量排产吧</div>
+      <div v-for="j in activeJobs" :key="j.id" class="job" :class="j.computedStatus">
+        <span class="i">{{ recipeIcon(j.recipe_id) }}</span>
+        <div class="m-info">
+          <b>
+            {{ j.recipe_name }} ×{{ j.status==='canceled' ? j.gain*j.doneBatches : j.gain*j.qty }}
+            <span class="job-state" :class="j.computedStatus">{{ stateLabel(j) }}</span>
+          </b>
+          <span class="tag">批次 {{ j.doneBatches }}/{{ j.qty }}</span>
+          <span class="tag" v-if="j.computedStatus==='running'">⏳ 约剩 {{ j.remainDays }} 天</span>
+          <span class="tag" v-if="j.status==='canceled' && j.qty-j.doneBatches>0">已退 {{ j.qty-j.doneBatches }} 批原料</span>
+          <div class="job-bar"><i :style="{width:(j.doneBatches/j.qty*100)+'%'}"></i></div>
+        </div>
+        <button v-if="j.status==='running'" class="mini" @click="store.cancelProduction(j.id)">取消退料</button>
+        <button v-if="(j.computedStatus==='done' || j.status==='canceled') && j.doneBatches>0"
+                class="mini green" @click="store.collectProduction(j.id)">
+          入库 ×{{ j.gain*j.doneBatches }}
+        </button>
+      </div>
     </div>
   </div>
 
@@ -157,7 +200,7 @@ function iconOf(it) {
   if (it.cat === 'seed') return '🌱'
   if (it.cat === 'product') { return { 'p-chicken': '🥚', 'p-cow': '🥛', 'p-sheep': '🧶' }[it.item_id] || '📦' }
   if (it.item_id === 'disaster-kit') return '🧱'
-  return { flour: '🌾制品', juice: '🧃', cheese: '🧀', wool1: '🧵' }[it.item_id] || '📦'
+  return { flour: '🍞', juice: '🧃', cheese: '🧀', bread: '🥖', wool: '🧵', popcorn: '🍿', pickle: '🥬' }[it.item_id] || '📦'
 }
 const matCount = computed(() =>
   store.inventory.filter((it) => it.cat === 'material').reduce((s, it) => s + it.qty, 0)
@@ -165,27 +208,47 @@ const matCount = computed(() =>
 const mill = computed(() => store.buildings.find((b) => b.name === '加工坊'))
 const barn = computed(() => store.buildings.find((b) => b.name === '畜棚'))
 
-const recipes = computed(() => {
-  // 基础配方始终可用；随等级解锁更多
-  const lv = mill.value?.level || 1
-  const arr = [
-    { id: 'flower', need: '小麦作物', consume: 2, from: 'crop-5', result: { id: 'flour', name: '面粉', cat: 'material' }, gain: 1 },
-    { id: 'juice', need: '番茄作物', consume: 2, from: 'crop-2', result: { id: 'juice', name: '番茄汁', cat: 'product' }, gain: 1 },
-    { id: 'cheese', need: '牛奶', consume: 2, from: 'p-cow', result: { id: 'cheese', name: '奶酪', cat: 'product' }, gain: 1 }
-  ]
-  if (lv >= 2) arr.push({ id: 'bread', need: '面粉', consume: 2, from: 'flour', result: { id: 'bread', name: '面包', cat: 'product' }, gain: 1 })
-  if (lv >= 3) arr.push({ id: 'cloth', need: '羊毛', consume: 1, from: 'p-sheep', result: { id: 'wool', name: '毛线', cat: 'product' }, gain: 1 })
-  return arr
-})
-function doProcess(r) {
-  store.processBuild(r.from, r.result, r.consume, r.gain)
+// ===== 生产队列 =====
+function stockOf(itemId) {
+  return store.inventory.find((it) => it.item_id === itemId)?.qty || 0
+}
+function recipeIcon(id) {
+  return store.recipes.find((r) => r.id === id)?.icon || '🛠️'
+}
+// 剩余可排队批次（容量 - 在队批次）
+const freeSlots = computed(() => Math.max(0, store.queueCapacity - store.queuedBatches))
+function canMake(r, n) {
+  if (mill.value.level < r.needLv) return false
+  if (n > freeSlots.value) return false
+  return stockOf(r.from) >= r.consume * n
+}
+async function doEnqueue(r, n) {
+  // 原料/空位只够一部分时，自动收缩为可做批次数
+  const real = Math.min(n, Math.floor(stockOf(r.from) / r.consume), freeSlots.value)
+  if (real <= 0) return
+  try { await store.enqueueProduction(r.id, real) } catch { /* toast 已提示 */ }
+}
+// 未领走的工单（完工未入库 / 加工中 / 已取消待入库）
+const activeJobs = computed(() => store.productionJobs)
+// 可入库 = 全部完工 或 已取消（在制工单须整单完工后才能领）
+const collectableJobs = computed(() =>
+  store.productionJobs.filter((j) => (j.computedStatus === 'done' || j.status === 'canceled') && j.doneBatches > 0)
+)
+const collectableBatches = computed(() =>
+  collectableJobs.value.reduce((s, j) => s + j.gain * j.doneBatches, 0)
+)
+function stateLabel(j) {
+  if (j.computedStatus === 'done') return '✓ 已完工'
+  if (j.status === 'canceled') return '已取消·待入库'
+  return j.start > (store.player?.abs_day ?? 0) ? '排队中' : '加工中'
 }
 </script>
 
 <style scoped>
 .tabs { display:flex;gap:6px;margin-bottom:14px; }
-.tabs button { background:#13233f;border:1px solid rgba(120,160,220,0.2);color:#aebadd;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px; }
+.tabs button { background:#13233f;border:1px solid rgba(120,160,220,0.2);color:#aebadd;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px;position:relative; }
 .tabs button.active { background:linear-gradient(135deg,#1d3f8f,#2962ff);color:#fff;border-color:transparent; }
+.badge{position:absolute;top:-6px;right:-6px;background:#e53935;color:#fff;font-size:10px;min-width:16px;height:16px;line-height:16px;border-radius:8px;padding:0 4px;font-weight:700;}
 .page { display:grid;grid-template-columns:1fr 1fr;gap:16px; }
 @media(max-width:760px){ .page{grid-template-columns:1fr;} }
 .pcol { display:flex;flex-direction:column;gap:2px; }
@@ -222,4 +285,22 @@ h4 { margin:0 0 8px;color:#fff;display:flex;gap:8px;align-items:center; }
 .b-icon{font-size:22px;}
 .b-qty{color:#ffd54f;}
 .b-cat{font-size:9px;color:#6f84ab;}
+/* 生产队列 */
+.queue-stat{font-size:12px;color:#aebadd;margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+.queue-stat b{color:#a5d6a7;font-size:14px;}
+.queue-stat b.full{color:#ef9a9a;}
+.proc-ctl{display:flex;gap:5px;flex-shrink:0;}
+.recipe .m-info .tag{white-space:nowrap;}
+.tag.lock{color:#ef9a9a;background:#3a1f1f;}
+.job{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px dashed rgba(120,160,220,0.1);}
+.job.done{background:rgba(67,160,71,0.08);border-radius:8px;padding-left:6px;padding-right:6px;}
+.job.canceled{opacity:.62;}
+.job-state{font-size:10px;font-weight:400;margin-left:6px;padding:2px 6px;border-radius:4px;}
+.job-state.running{color:#90caf9;background:#122a47;}
+.job-state.done{color:#a5d6a7;background:#1b3a21;}
+.job-state.canceled{color:#8ba2c8;background:#23304a;}
+.job-bar{width:100%;height:4px;background:#0c1730;border-radius:3px;overflow:hidden;margin-top:3px;}
+.job-bar i{display:block;height:100%;background:linear-gradient(90deg,#2962ff,#5c97ff);transition:width .3s;}
+.job.done .job-bar i{background:#43a047;}
+h4 .collect-all{margin-left:auto;font-size:11px;}
 </style>
