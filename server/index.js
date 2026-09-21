@@ -1,6 +1,7 @@
 import express from 'express'
 import { db } from './db.js'
 import { TYPES, ensureWeather, settleWeather, currentWeather } from './weather.js'
+import { RECIPES } from './recipes.js'
 
 const app = express()
 app.use(express.json())
@@ -64,7 +65,9 @@ app.get('/api/state', (req, res) => {
     animals: q('SELECT * FROM animals'),
     plots: q('SELECT * FROM plots'),
     weather: currentWeather(),
-    weatherLog: q('SELECT * FROM weather_log ORDER BY id DESC LIMIT 8')
+    weatherLog: q('SELECT * FROM weather_log ORDER BY id DESC LIMIT 8'),
+    recipes: RECIPES,
+    processQueue: q("SELECT * FROM process_jobs WHERE status='pending' ORDER BY id")
   })
 })
 
@@ -248,16 +251,49 @@ app.post('/api/collect', (req, res) => {
   res.json({ ok: true, item: prod[0], gold: gain })
 })
 
-// 加工作物
-app.post('/api/process', (req, res) => {
-  const { from, result, consume, gain } = req.body
-  const hold = q1('SELECT qty FROM inventory WHERE item_id=?', from)
-  const stock = hold?.qty || 0
-  if (stock < consume) return res.status(400).json({ error: 'not enough' })
-  run(`UPDATE inventory SET qty=qty-? WHERE item_id=?`, consume, from)
-  addInv(result.id, result.name, result.cat, gain)
-  cleanEmpty()
-  res.json({ ok: true })
+// 排产：批量下单，原料 upfront 扣除，按游戏天推进，完工自动入库
+app.post('/api/process/queue', (req, res) => {
+  const recipe = RECIPES.find((r) => r.id === req.body?.recipeId)
+  if (!recipe) return res.status(404).json({ error: '配方不存在' })
+  const qty = Math.max(1, Math.min(Math.floor(Number(req.body?.qty) || 1), 99))
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const mill = q1("SELECT level FROM buildings WHERE name='加工坊'")
+    if ((mill?.level || 1) < recipe.minLv) throw Object.assign(new Error(`加工坊 Lv.${recipe.minLv} 解锁`), { status: 400 })
+    const need = recipe.consume * qty
+    const hold = q1('SELECT qty FROM inventory WHERE item_id=?', recipe.from)
+    if ((hold?.qty || 0) < need) throw Object.assign(new Error(`${recipe.fromName}不足（需 ${need}）`), { status: 400 })
+    run('UPDATE inventory SET qty=qty-? WHERE item_id=?', need, recipe.from)
+    const absDay = q1('SELECT abs_day FROM player WHERE id=1').abs_day
+    const r = run(`INSERT INTO process_jobs
+                   (recipe_id,qty,from_item,from_name,from_cat,consume,result_id,result_name,result_cat,gain,days_per,total_days,start_abs)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      recipe.id, qty, recipe.from, recipe.fromName, recipe.fromCat, recipe.consume,
+      recipe.result.id, recipe.result.name, recipe.result.cat, recipe.gain, recipe.days, recipe.days * qty, absDay)
+    cleanEmpty()
+    db.exec('COMMIT')
+    res.json({ ok: true, job: q1('SELECT * FROM process_jobs WHERE id=?', r.lastInsertRowid) })
+  } catch (e) {
+    try { db.exec('ROLLBACK') } catch { /* 事务可能已结束，忽略 */ }
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 取消排产：按未开工份数退还原料（已开工部分不退）
+app.post('/api/process/cancel', (req, res) => {
+  const job = q1('SELECT * FROM process_jobs WHERE id=?', req.body?.id)
+  if (!job || job.status !== 'pending') return res.status(400).json({ error: '工单不存在或已结束' })
+  const refundQty = Math.floor((job.total_days - job.done_days) / job.days_per) * job.consume
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    if (refundQty > 0) addInv(job.from_item, job.from_name, job.from_cat, refundQty)
+    run("UPDATE process_jobs SET status='cancelled' WHERE id=?", job.id)
+    db.exec('COMMIT')
+    res.json({ ok: true, refundQty, refundName: job.from_name })
+  } catch (e) {
+    try { db.exec('ROLLBACK') } catch { /* 事务可能已结束，忽略 */ }
+    res.status(e.status || 500).json({ error: e.message })
+  }
 })
 
 // 升级建筑
@@ -333,6 +369,23 @@ function advanceDay() {
       health = Math.max(0, Math.min(100, health))
       run(`UPDATE animals SET feed=?,health=?,ready=1 WHERE id=?`, feed, health, a.id)
     }
+    // 加工坊生产队列：按加工坊等级并行推进（每天 +1 天进度），完工自动入库
+    const mill = q1("SELECT level FROM buildings WHERE name='加工坊'")
+    const slots = Math.max(1, mill?.level || 1)
+    const jobs = q("SELECT * FROM process_jobs WHERE status='pending' ORDER BY id LIMIT ?", slots)
+    for (const j of jobs) {
+      const done = j.done_days + 1
+      if (done >= j.total_days) {
+        run("UPDATE process_jobs SET done_days=?, status='done' WHERE id=?", done, j.id)
+        addInv(j.result_id, j.result_name, j.result_cat, j.gain * j.qty)
+        logs.push(`⚙️ 加工完工：${j.result_name} ×${j.gain * j.qty} 已入库`)
+      } else {
+        run('UPDATE process_jobs SET done_days=? WHERE id=?', done, j.id)
+      }
+    }
+    // 已结束工单只保留最近 20 条
+    run(`DELETE FROM process_jobs WHERE status!='pending' AND id NOT IN
+         (SELECT id FROM process_jobs WHERE status!='pending' ORDER BY id DESC LIMIT 20)`)
     // 天数推进与季节轮转
     if (day > 28) {
       day = 1

@@ -98,6 +98,26 @@ CREATE TABLE IF NOT EXISTS weather_log (
   msg TEXT NOT NULL,
   UNIQUE(event_id, abs_day)
 );
+
+-- 加工坊生产队列：排产时扣料，按游戏天推进，完工入库；取消退还未开工部分原料
+CREATE TABLE IF NOT EXISTS process_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipe_id TEXT NOT NULL,             -- 配方ID
+  qty INTEGER NOT NULL,                -- 批量份数
+  from_item TEXT NOT NULL,             -- 原料 item_id
+  from_name TEXT NOT NULL,
+  from_cat TEXT NOT NULL,              -- 原料分类（退料回库用）
+  consume INTEGER NOT NULL,            -- 每份原料消耗
+  result_id TEXT NOT NULL,             -- 产物 item_id
+  result_name TEXT NOT NULL,
+  result_cat TEXT NOT NULL,
+  gain INTEGER NOT NULL,               -- 每份产出数量
+  days_per INTEGER NOT NULL,           -- 每份工期（天）
+  total_days INTEGER NOT NULL,         -- 总工期 = days_per * qty
+  done_days INTEGER NOT NULL DEFAULT 0,
+  start_abs INTEGER NOT NULL,          -- 排产时的绝对天数
+  status TEXT NOT NULL DEFAULT 'pending'  -- pending/done/cancelled
+);
 `)
 
 // 兼容旧存档：player 增加绝对天数（天气结算对齐用）

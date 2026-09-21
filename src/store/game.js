@@ -20,6 +20,8 @@ export const useGameStore = defineStore('game', {
     plots: [],
     weather: null,
     weatherLog: [],
+    recipes: [],
+    processQueue: [],
     selectedPlot: null,
     seedMode: false,
     selectedCropId: null,
@@ -44,6 +46,8 @@ export const useGameStore = defineStore('game', {
       this.plots = d.plots
       this.weather = d.weather
       this.weatherLog = d.weatherLog || []
+      this.recipes = d.recipes || []
+      this.processQueue = d.processQueue || []
       this.loaded = true
     },
     pushLog(msg, type = 'info') {
@@ -140,11 +144,19 @@ export const useGameStore = defineStore('game', {
         this.showToast(`收集 ${r.item} +${r.gold}金`, 'success')
       } catch (e) { this.showToast(e.message, 'warn') }
     },
-    async processBuild(from, result, consume, gain) {
+    async queueProcess(recipeId, qty = 1) {
       try {
-        await api('/process', 'POST', { from, result, consume, gain })
+        const r = await api('/process/queue', 'POST', { recipeId, qty })
         await this.load()
-        this.showToast(`加工完成：${result.name}`, 'success')
+        const j = r.job
+        this.showToast(`已排产 ${j.result_name} ×${j.gain * j.qty}，工期 ${j.total_days} 天`, 'success')
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+    async cancelProcess(id) {
+      try {
+        const r = await api('/process/cancel', 'POST', { id })
+        await this.load()
+        this.showToast(r.refundQty > 0 ? `已取消，退还 ${r.refundName} ×${r.refundQty}` : '已取消，原料均已开工不退还', 'info')
       } catch (e) { this.showToast(e.message, 'warn') }
     },
     async upgradeBuilding(id) {

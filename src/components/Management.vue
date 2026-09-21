@@ -51,15 +51,33 @@
     <div class="pcol card">
       <h4>⚙️ 加工坊 <span class="lvl">Lv.{{ mill.level }}</span></h4>
       <div class="row" v-for="r in recipes" :key="r.id">
-        <span class="i">🛠️</span>
+        <span class="i">{{ r.icon }}</span>
         <div class="m-info">
           <b>{{ r.name }}</b>
-          <span class="tag">消耗 {{ r.consume }} {{ r.need }}</span>
+          <span class="tag">消耗 {{ r.fromName }} ×{{ r.consume }}</span>
           <span class="tag">→ {{ r.result.name }} ×{{ r.gain }}</span>
+          <span class="tag">⏳ {{ r.days }}天/份</span>
+          <span class="tag lock" v-if="locked(r)">🔒 Lv.{{ r.minLv }} 解锁</span>
+          <span class="tag" v-else>库存 {{ stockOf(r.from) }}</span>
         </div>
-        <button class="mini" @click="doProcess(r)">加工</button>
+        <button class="mini" :disabled="locked(r) || !canQueue(r,1)" @click="store.queueProcess(r.id,1)">排产</button>
+        <button class="mini" :disabled="locked(r) || !canQueue(r,5)" @click="store.queueProcess(r.id,5)">×5</button>
       </div>
-      <button class="wide" @click="store.upgradeBuilding(mill.id)">🔧 升级加工坊（🪙{{ mill.level*40 }}）→ 解锁更多配方</button>
+      <button class="wide" @click="store.upgradeBuilding(mill.id)">🔧 升级加工坊（🪙{{ mill.level*40 }}）→ 解锁配方 · 并行槽位 +1</button>
+    </div>
+    <div class="pcol card">
+      <h4>📋 生产队列 <span class="lvl">并行 {{ Math.min(mill.level, store.processQueue.length) }}/{{ mill.level }}</span></h4>
+      <div v-if="!store.processQueue.length" class="none">队列空空，从左侧选择配方排产</div>
+      <div class="job" v-for="(j, i) in store.processQueue" :key="j.id">
+        <div class="j-top">
+          <b>{{ j.result_name }} ×{{ j.gain * j.qty }}</b>
+          <span class="tag" :class="i < mill.level ? 'run' : 'wait'">{{ i < mill.level ? '⚙️ 生产中' : '⏸ 排队中' }}</span>
+          <span class="tag">{{ j.done_days }}/{{ j.total_days }} 天</span>
+          <button class="mini cancel" @click="store.cancelProcess(j.id)">取消</button>
+        </div>
+        <div class="jbar"><i :style="{width:(j.done_days/j.total_days*100)+'%'}"></i></div>
+        <div class="j-sub">已投料 {{ j.from_name }} ×{{ j.consume * j.qty }} · 取消退还未开工部分原料</div>
+      </div>
     </div>
   </div>
 
@@ -157,7 +175,7 @@ function iconOf(it) {
   if (it.cat === 'seed') return '🌱'
   if (it.cat === 'product') { return { 'p-chicken': '🥚', 'p-cow': '🥛', 'p-sheep': '🧶' }[it.item_id] || '📦' }
   if (it.item_id === 'disaster-kit') return '🧱'
-  return { flour: '🌾制品', juice: '🧃', cheese: '🧀', wool1: '🧵' }[it.item_id] || '📦'
+  return { flour: '🌾', juice: '🧃', cheese: '🧀', bread: '🍞', wool: '🧵' }[it.item_id] || '📦'
 }
 const matCount = computed(() =>
   store.inventory.filter((it) => it.cat === 'material').reduce((s, it) => s + it.qty, 0)
@@ -165,21 +183,12 @@ const matCount = computed(() =>
 const mill = computed(() => store.buildings.find((b) => b.name === '加工坊'))
 const barn = computed(() => store.buildings.find((b) => b.name === '畜棚'))
 
-const recipes = computed(() => {
-  // 基础配方始终可用；随等级解锁更多
-  const lv = mill.value?.level || 1
-  const arr = [
-    { id: 'flower', need: '小麦作物', consume: 2, from: 'crop-5', result: { id: 'flour', name: '面粉', cat: 'material' }, gain: 1 },
-    { id: 'juice', need: '番茄作物', consume: 2, from: 'crop-2', result: { id: 'juice', name: '番茄汁', cat: 'product' }, gain: 1 },
-    { id: 'cheese', need: '牛奶', consume: 2, from: 'p-cow', result: { id: 'cheese', name: '奶酪', cat: 'product' }, gain: 1 }
-  ]
-  if (lv >= 2) arr.push({ id: 'bread', need: '面粉', consume: 2, from: 'flour', result: { id: 'bread', name: '面包', cat: 'product' }, gain: 1 })
-  if (lv >= 3) arr.push({ id: 'cloth', need: '羊毛', consume: 1, from: 'p-sheep', result: { id: 'wool', name: '毛线', cat: 'product' }, gain: 1 })
-  return arr
-})
-function doProcess(r) {
-  store.processBuild(r.from, r.result, r.consume, r.gain)
-}
+// 配方由服务端下发（含工期与解锁等级），此处只补充图标与状态
+const RECIPE_ICONS = { flour: '🌾', juice: '🧃', cheese: '🧀', bread: '🍞', wool: '🧵' }
+const recipes = computed(() => store.recipes.map((r) => ({ ...r, icon: RECIPE_ICONS[r.id] || '🛠️' })))
+const locked = (r) => (mill.value?.level || 1) < r.minLv
+const stockOf = (itemId) => store.inventory.find((it) => it.item_id === itemId)?.qty || 0
+const canQueue = (r, n) => stockOf(r.from) >= r.consume * n
 </script>
 
 <style scoped>
@@ -217,6 +226,17 @@ h4 { margin:0 0 8px;color:#fff;display:flex;gap:8px;align-items:center; }
 .hp .bar i{display:block;height:100%;}
 .tiny{font-size:9px;color:#8ba2c8;width:26px;}
 .ready{color:#ffd54f;font-size:11px;}
+.tag.lock{color:#ef9a9a;}
+.tag.run{color:#a5d6a7;}
+.tag.wait{color:#8ba2c8;}
+.mini.cancel{background:#c62828;}
+.job{padding:8px 0;border-bottom:1px dashed rgba(120,160,220,0.1);}
+.job:last-child{border-bottom:none;}
+.j-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.j-top b{color:#e8eefb;font-size:13px;flex:1;min-width:80px;}
+.jbar{height:6px;background:#0c1730;border-radius:3px;overflow:hidden;margin:6px 0 4px;}
+.jbar i{display:block;height:100%;background:linear-gradient(90deg,#43a047,#9ccc65);transition:width .3s;}
+.j-sub{font-size:10px;color:#6f84ab;}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;}
 .bag-item{background:#16263f;border:1px solid rgba(120,160,220,0.12);border-radius:9px;padding:10px;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:12px;color:#dbe4f3;}
 .b-icon{font-size:22px;}
